@@ -4,6 +4,18 @@
 
 For the full product vision, data flow, and hackathon scope, see [DESIGN.md](./DESIGN.md).
 
+## Demo
+
+Walkthrough of The Architect in action.
+
+<p align="center">
+  <a href="https://youtu.be/oWFMSYkaXiM" title="Play demo on YouTube">
+    <img src="https://img.youtube.com/vi/oWFMSYkaXiM/hqdefault.jpg" alt="The Architect — demo video (opens on YouTube)" width="480">
+  </a>
+</p>
+
+<p align="center"><strong><a href="https://youtu.be/oWFMSYkaXiM">Watch on YouTube →</a></strong></p>
+
 ## What’s in this repo
 
 | Part | Stack | Role |
