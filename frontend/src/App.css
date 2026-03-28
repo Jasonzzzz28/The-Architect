@@ -218,6 +218,17 @@
   color: var(--text-h);
 }
 
+.feedback-text.live-stream {
+  max-height: 14rem;
+  overflow-y: auto;
+  font-size: 0.86rem;
+}
+
+.live-dot {
+  color: #22c55e;
+  font-weight: 600;
+}
+
 .voice-line {
   margin: 0 0 0.75rem;
   padding: 0.65rem 0.85rem;

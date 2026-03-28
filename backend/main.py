@@ -5,15 +5,36 @@ Session memory; user OAuth token verified via CRM and reused for Vertex AI (Gemi
 
 from __future__ import annotations
 
+import logging
 import os
 import uuid
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from ai_module import generate_feedback
+from live_bridge import run_live_bridge
+
+logger = logging.getLogger(__name__)
+
+
+def _configure_app_logging() -> None:
+    """Uvicorn often leaves the root logger at WARNING; app INFO would be dropped."""
+    fmt = logging.Formatter("%(levelname)s [%(name)s] %(message)s")
+    for name in ("main", "live_bridge"):
+        lg = logging.getLogger(name)
+        lg.setLevel(logging.INFO)
+        if lg.handlers:
+            continue
+        h = logging.StreamHandler()
+        h.setFormatter(fmt)
+        lg.addHandler(h)
+        lg.propagate = False
+
+
+_configure_app_logging()
 
 app = FastAPI(title="The Architect", version="0.1.0")
 
@@ -191,6 +212,46 @@ async def get_feedback(body: GetFeedbackBody) -> FeedbackResponse:
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"AI feedback failed: {e!s}") from e
     return FeedbackResponse(**result)
+
+
+@app.websocket("/ws/live")
+async def websocket_live(websocket: WebSocket, session_id: str) -> None:
+    """
+    Browser <-> Vertex Gemini Live (BidiGenerateContent). Requires valid session with access_token.
+    Client sends JSON frames in Live API format (e.g. client_content). Server forwards Vertex responses.
+    """
+    tag = session_id[:8] if len(session_id) >= 8 else session_id
+    await websocket.accept()
+    logger.info("ws/live accepted session_id=%s…", tag)
+    if session_id not in sessions:
+        logger.warning("ws/live closing: invalid session_id=%s…", tag)
+        try:
+            await websocket.close(code=4000, reason="Invalid session")
+        except WebSocketException:
+            pass
+        return
+    s = sessions[session_id]
+    token = s.get("access_token")
+    project_id = s.get("project_id")
+    if not token or not project_id:
+        logger.warning(
+            "ws/live closing: session %s… missing token=%s project_id=%s",
+            tag,
+            bool(token),
+            bool(project_id),
+        )
+        try:
+            await websocket.close(code=4001, reason="Session missing credentials")
+        except WebSocketException:
+            pass
+        return
+    logger.info(
+        "ws/live starting bridge session=%s… project_id=%s",
+        tag,
+        project_id,
+    )
+    await run_live_bridge(websocket, str(token), str(project_id), client_tag=tag)
+    logger.info("ws/live bridge returned session=%s…", tag)
 
 
 @app.get("/health")

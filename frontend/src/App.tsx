@@ -5,6 +5,17 @@ import type { OrderedExcalidrawElement } from '@excalidraw/excalidraw/element/ty
 import '@excalidraw/excalidraw/index.css'
 import './App.css'
 import { ApiError, getFeedback, sendDiagram, streamVoice, verifyGcp } from './api'
+import { LiveAudioOut } from './liveAudioPlayer'
+import {
+  buildLiveContextUpdate,
+  buildLiveNudgeTurn,
+  buildLiveSessionStartTurn,
+  liveDebounceMsForTranscript,
+  liveWebSocketUrl,
+  parseLiveServerMessages,
+  wsPayloadToUtf8,
+  type LiveConnectionStatus,
+} from './liveWs'
 import { FeedbackPanel } from './components/FeedbackPanel'
 import { GcpTokenModal } from './components/GcpTokenModal'
 import { VoiceControls } from './components/VoiceControls'
@@ -30,9 +41,22 @@ export default function App() {
   const [diagramHints, setDiagramHints] = useState<string[]>([])
   const [lastVoiceLine, setLastVoiceLine] = useState('')
   const [feedbackBusy, setFeedbackBusy] = useState(false)
+  const [liveStatus, setLiveStatus] = useState<LiveConnectionStatus>('off')
+  const [liveReady, setLiveReady] = useState(false)
+  const [liveStreamText, setLiveStreamText] = useState('')
+  const [liveError, setLiveError] = useState<string | null>(null)
+  const [diagramEpoch, setDiagramEpoch] = useState(0)
+  /** Bumps when Live may send debounced context (after first model `turn_complete` or fallback timeout). */
+  const [liveAmbientGate, setLiveAmbientGate] = useState(0)
   const excalidrawRef = useRef<ExcalidrawImperativeAPI | null>(null)
   const diagramDebounce = useRef<ReturnType<typeof setTimeout> | null>(null)
   const sessionIdRef = useRef<string | null>(null)
+  const liveWsRef = useRef<WebSocket | null>(null)
+  const liveAudioRef = useRef<LiveAudioOut | null>(null)
+  const liveOpeningSentRef = useRef(false)
+  /** False until first `turn_complete` — avoids sending context during T0 audio (interrupts native-audio stream). */
+  const liveAmbientAllowedRef = useRef(false)
+  const diagramForLiveRef = useRef<string>('')
   const recRef = useRef<SpeechRecognition | null>(null)
   /** Text confirmed as final by the speech engine; interim hypotheses are not stored here. */
   const speechCommittedRef = useRef('')
@@ -78,7 +102,15 @@ export default function App() {
   const handleDiagramChange = useCallback(
     (elements: readonly OrderedExcalidrawElement[]) => {
       if (diagramDebounce.current) clearTimeout(diagramDebounce.current)
-      diagramDebounce.current = setTimeout(() => pushDiagram(elements), 800)
+      diagramDebounce.current = setTimeout(() => {
+        pushDiagram(elements)
+        try {
+          diagramForLiveRef.current = JSON.stringify(serializeElements(elements)).slice(0, 12000)
+        } catch {
+          diagramForLiveRef.current = ''
+        }
+        setDiagramEpoch((n) => n + 1)
+      }, 800)
     },
     [pushDiagram],
   )
@@ -228,12 +260,144 @@ export default function App() {
   }, [sessionId, transcript, invalidateSession])
 
   useEffect(() => {
-    if (!autoFeedback || !sessionId) return
-    const t = setInterval(() => {
-      void runFeedback()
-    }, 9000)
-    return () => clearInterval(t)
-  }, [autoFeedback, sessionId, runFeedback])
+    if (!autoFeedback || !sessionId) {
+      const existing = liveWsRef.current
+      liveWsRef.current = null
+      existing?.close()
+      liveAudioRef.current?.close()
+      liveAudioRef.current = null
+      setLiveReady(false)
+      setLiveStatus('off')
+      setLiveError(null)
+      setLiveStreamText('')
+      return
+    }
+
+    setLiveStatus('connecting')
+    setLiveReady(false)
+    setLiveError(null)
+    setLiveStreamText('')
+    liveOpeningSentRef.current = false
+    liveAmbientAllowedRef.current = false
+
+    const url = liveWebSocketUrl(sessionId)
+    const ws = new WebSocket(url)
+    liveWsRef.current = ws
+    let cancelled = false
+
+    ws.onmessage = (ev) => {
+      void (async () => {
+        const raw = await wsPayloadToUtf8(ev.data)
+        const events = parseLiveServerMessages(raw)
+        for (const parsed of events) {
+          switch (parsed.kind) {
+            case 'setup_complete':
+              if (!liveAudioRef.current) liveAudioRef.current = new LiveAudioOut()
+              if (!liveOpeningSentRef.current && ws.readyState === WebSocket.OPEN) {
+                liveOpeningSentRef.current = true
+                ws.send(JSON.stringify(buildLiveSessionStartTurn()))
+              }
+              setLiveReady(true)
+              setLiveStatus('live')
+              break
+            case 'audio':
+              if (!liveAudioRef.current) liveAudioRef.current = new LiveAudioOut()
+              liveAudioRef.current.enqueueBase64Pcm16Le(parsed.base64Pcm, parsed.mimeType)
+              break
+            case 'output_transcription':
+              setLiveStreamText((prev) => prev + parsed.text)
+              break
+            case 'interrupted':
+              liveAudioRef.current?.interrupt()
+              break
+            case 'text':
+              setLiveStreamText((prev) => prev + parsed.text)
+              break
+            case 'turn_complete':
+              liveAmbientAllowedRef.current = true
+              setLiveAmbientGate((g) => g + 1)
+              setLiveStreamText((prev) => (/\n\n$/.test(prev) ? prev : `${prev}\n\n`))
+              break
+            case 'architect_error':
+              setLiveError(parsed.message)
+              setLiveStatus('error')
+              break
+            default:
+              break
+          }
+        }
+      })().catch((e) => {
+        console.error('Live WebSocket message handling failed', e)
+        setLiveError('Could not parse a Live message from the server.')
+        setLiveStatus('error')
+      })
+    }
+
+    ws.onerror = () => {
+      if (cancelled) return
+      setLiveError('WebSocket error (is the backend running on port 8000?)')
+      setLiveStatus('error')
+    }
+
+    ws.onclose = () => {
+      if (cancelled) return
+      if (liveWsRef.current !== ws) return
+      setLiveReady(false)
+      setLiveStatus((s) => (s === 'off' ? 'off' : 'error'))
+      setLiveError((prev) => prev ?? 'Live session closed. Toggle auto feedback to reconnect.')
+    }
+
+    return () => {
+      cancelled = true
+      if (liveWsRef.current === ws) liveWsRef.current = null
+      ws.close()
+      liveAudioRef.current?.close()
+      liveAudioRef.current = null
+    }
+  }, [autoFeedback, sessionId])
+
+  useEffect(() => {
+    if (!autoFeedback || !liveReady || !sessionId) return
+    const id = window.setTimeout(() => {
+      if (!liveAmbientAllowedRef.current) {
+        liveAmbientAllowedRef.current = true
+        setLiveAmbientGate((g) => g + 1)
+      }
+    }, 35000)
+    return () => clearTimeout(id)
+  }, [autoFeedback, liveReady, sessionId])
+
+  const sendLiveNudge = useCallback(() => {
+    const w = liveWsRef.current
+    if (!w || w.readyState !== WebSocket.OPEN) return
+    const api = excalidrawRef.current
+    const elements = api?.getSceneElements() ?? []
+    let diagramJson = diagramForLiveRef.current
+    try {
+      if (!diagramJson) diagramJson = JSON.stringify(serializeElements(elements)).slice(0, 12000)
+    } catch {
+      diagramJson = ''
+    }
+    w.send(JSON.stringify(buildLiveNudgeTurn(transcript, diagramJson)))
+  }, [transcript])
+
+  useEffect(() => {
+    if (!autoFeedback || !liveReady || !sessionId) return
+    if (!liveAmbientAllowedRef.current) return
+    const ws = liveWsRef.current
+    if (!ws || ws.readyState !== WebSocket.OPEN) return
+    const tTrim = transcript.trim()
+    const dj = diagramForLiveRef.current.trim()
+    if (!tTrim && !dj) return
+
+    const ms = liveDebounceMsForTranscript(transcript)
+    const id = window.setTimeout(() => {
+      if (liveWsRef.current !== ws || ws.readyState !== WebSocket.OPEN) return
+      if (!liveAmbientAllowedRef.current) return
+      ws.send(JSON.stringify(buildLiveContextUpdate(transcript, diagramForLiveRef.current)))
+    }, ms)
+    return () => clearTimeout(id)
+  }, [transcript, diagramEpoch, autoFeedback, liveReady, sessionId, liveAmbientGate])
 
   return (
     <div className="app-shell">
@@ -290,6 +454,9 @@ export default function App() {
             onToggleAuto={() => setAutoFeedback((v) => !v)}
             onGetFeedback={() => void runFeedback()}
             feedbackBusy={feedbackBusy}
+            liveStatus={liveStatus}
+            liveReady={liveReady}
+            onNudgeInterviewer={sendLiveNudge}
           />
           <div className="excalidraw-wrap" aria-label="Diagram canvas">
             <Excalidraw
@@ -305,6 +472,10 @@ export default function App() {
           diagramHints={diagramHints}
           loading={feedbackBusy}
           lastVoiceLine={lastVoiceLine}
+          liveStatus={liveStatus}
+          liveStreamText={liveStreamText}
+          liveError={liveError}
+          autoFeedbackOn={autoFeedback}
         />
       </main>
     </div>

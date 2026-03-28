@@ -1,3 +1,5 @@
+import type { LiveConnectionStatus } from '../liveWs'
+
 type Props = {
   sessionReady: boolean
   listening: boolean
@@ -10,6 +12,9 @@ type Props = {
   onToggleAuto: () => void
   onGetFeedback: () => void
   feedbackBusy: boolean
+  liveStatus: LiveConnectionStatus
+  liveReady: boolean
+  onNudgeInterviewer: () => void
 }
 
 export function VoiceControls({
@@ -24,7 +29,19 @@ export function VoiceControls({
   onToggleAuto,
   onGetFeedback,
   feedbackBusy,
+  liveStatus,
+  liveReady,
+  onNudgeInterviewer,
 }: Props) {
+  const liveHint =
+    autoFeedback && liveStatus === 'connecting'
+      ? 'Connecting to Gemini Live…'
+      : autoFeedback && liveStatus === 'live'
+        ? 'Live interviewer stays quiet unless you ask something, request feedback, or use Nudge. Context syncs after you pause (~3s; faster if you type a question).'
+        : autoFeedback && liveStatus === 'error'
+          ? 'Live connection issue — check the feedback panel or reconnect.'
+          : null
+
   return (
     <div className="voice-controls">
       <div className="voice-row">
@@ -41,8 +58,9 @@ export function VoiceControls({
           className={`btn ${autoFeedback ? 'primary' : 'secondary'}`}
           onClick={onToggleAuto}
           disabled={!sessionReady}
+          title="Vertex Gemini Live: streaming native audio + captions (WebSocket)"
         >
-          Auto feedback {autoFeedback ? 'on' : 'off'}
+          Auto (Live) {autoFeedback ? 'on' : 'off'}
         </button>
         <button
           type="button"
@@ -52,7 +70,17 @@ export function VoiceControls({
         >
           {feedbackBusy ? '…' : 'Get feedback'}
         </button>
+        <button
+          type="button"
+          className="btn secondary"
+          onClick={onNudgeInterviewer}
+          disabled={!autoFeedback || !liveReady || liveStatus !== 'live'}
+          title="Ask the Live interviewer to answer your question or give feedback now"
+        >
+          Nudge interviewer
+        </button>
       </div>
+      {liveHint ? <p className="muted small">{liveHint}</p> : null}
       {voiceError ? <p className="form-error small voice-error">{voiceError}</p> : null}
       {!supported ? (
         <p className="muted small">
