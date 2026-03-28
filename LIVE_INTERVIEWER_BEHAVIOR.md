@@ -71,7 +71,7 @@ Stop training the model on “something changed every few hundred ms.”
 | **Session opening** | After `liveReady`, send **one** synthetic `client_content` turn: e.g. `"(Session start — please give your brief opening as interviewer only; then wait.)"` so T0 is explicit. |
 | **Debounce / batching** | Increase debounce for “ambient” updates (e.g. **2–4 s** after transcript/diagram stops changing) **or** only send on **sentence boundaries** / **manual “Send to interviewer”** (see below). |
 | **Manual “nudge”** | A button: “Ask interviewer to respond now” → sends current transcript + diagram **once** with text like *“Please respond now (feedback or answer my last question as appropriate).”* |
-| **Question / feedback heuristics (lightweight)** | Optional: if the latest transcript contains `?` or keywords (`feedback`, `what do you think`, `clarify`, …), allow a **shorter** debounce or immediate send so T1/T2 feel responsive. |
+| **Question / feedback heuristics (lightweight)** | Implemented in `liveTranscriptLooksUrgent()`: `?` plus spoken patterns without punctuation (e.g. “how does … work”, “should I …”, “what about …”, “do you think …”, “any constraints”). Shorter debounce (~400 ms) when matched. |
 
 **Strong recommendation:** Do **not** send full context on a fixed **450 ms** timer tied to every keystroke or STT partial; that alone will keep the model talking.
 
@@ -112,6 +112,8 @@ Exact fields should be verified against the **Live API reference** for the model
 **Common causes:**
 
 1. **New `client_content` during the opening** — Native-audio Live often **interrupts** or restarts generation when a user turn arrives mid-response. The debounced “context update” used to fire a few seconds after connect while T0 was still playing, which could restart the opening. **Mitigation (implemented):** do not send debounced context until the first server **`turn_complete`** after connect (with a 35 s fallback if that frame never arrives).
+
+1b. **New `client_content` during *any* model answer** — Same mechanism: if STT or diagram debounce sends context while the interviewer is still speaking (e.g. after your question), the stream **restarts** and you hear the first sentence loop. **Mitigation (implemented):** treat the model as **busy** from the first **`audio` / model `text` / `output_transcription`** until **`turn_complete`** (or **`interrupted`**); **do not** send debounced context while busy.
 
 2. **Audio chunk scheduling races** — Multiple PCM chunks scheduled in parallel `.then()` callbacks could read a stale `nextStart` and overlap or stutter. **Mitigation (implemented):** serialize scheduling with an internal promise chain in `LiveAudioOut`.
 

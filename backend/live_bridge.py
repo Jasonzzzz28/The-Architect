@@ -27,13 +27,13 @@ LIVE_INSTRUCTION_SUFFIX = """
 You are a **staff+ system design interviewer** for the problem above. **Spoken** output only when appropriate; calm, concise, no lecturing.
 
 ### Default
-**Stay silent** until one of the triggers below applies. Do **not** fill dead air, narrate the canvas, or comment on every small change.
+The candidate’s **speech is streamed as raw audio**; use the session’s **voice-activity / end-of-speech** signals to treat a **turn** as complete before you reply—do not respond in the middle of an utterance unless the server marks an end-of-turn. **Stay silent** until a trigger applies. Do **not** fill dead air, narrate the canvas, or comment on every small change.
 
 ### Triggers (speak **once** per trigger, then stop)
 
 - **T0 — Session start:** The user message explicitly marks session start. Give **one** short opening: restate the problem in 1–2 sentences, say they should walk you through the design and ask you for requirements or constraints, then **stop**. **Never repeat or restart this opening** if you already delivered it—new context messages are not a new session.
 
-- **T1 — Direct question:** The candidate’s latest words contain a **question** or clear request for information (including implied “should I…?”, “how would you…?”). **Answer only that**, briefly, then stop.
+- **T1 — Direct question:** The candidate’s latest words contain a **question** or clear request for information. They may **not** use a question mark (speech transcription often drops it)—treat WH-questions, modals (“should I…”, “how would you…”, “can we…”), and “not sure / wondering” as questions. **Answer only that**, briefly, then stop.
 
 - **T2 — Explicit feedback request:** They ask for your opinion, feedback, or what’s missing (e.g. “what do you think?”, “any feedback?”, “anything I’m missing?”). Give **focused** feedback, then stop.
 
@@ -80,7 +80,18 @@ def build_setup_message(
                 "parts": [{"text": _live_system_prompt()}],
             },
             "proactivity": {"proactiveAudio": False},
+            "input_audio_transcription": {},
             "output_audio_transcription": {},
+            "realtime_input_config": {
+                "automatic_activity_detection": {
+                    "disabled": False,
+                    "silence_duration_ms": 1200,
+                    "prefix_padding_ms": 400,
+                    "end_of_speech_sensitivity": "END_SENSITIVITY_UNSPECIFIED",
+                    "start_of_speech_sensitivity": "START_SENSITIVITY_UNSPECIFIED",
+                },
+                "activity_handling": "ACTIVITY_HANDLING_UNSPECIFIED",
+            },
         },
     }
 

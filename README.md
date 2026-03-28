@@ -54,7 +54,7 @@ Open the URL Vite prints (typically `http://localhost:5173`). The dev server pro
 ### 3. First-time flow in the UI
 
 1. Paste your **access token** and, if you like, a **GCP project ID** (otherwise the backend uses the first project returned by `projects.list`).
-2. Use **Start voice** or type in **Live transcript**, draw on the canvas, then **Get feedback** or **Auto (Live)**. With Live on, the interviewer opens with a short intro, then stays mostly quiet; context syncs after you pause typing (~3 s, or ~0.6 s if you look like you’re asking a question). Use **Nudge interviewer** anytime you want a direct answer or feedback. See [LIVE_INTERVIEWER_BEHAVIOR.md](./LIVE_INTERVIEWER_BEHAVIOR.md).
+2. Use **Start voice** so your speech fills the **Live transcript** (read-only; voice only), draw on the canvas, then **Get feedback** or **Auto (Live)**. With Live on, the interviewer opens with a short intro, then stays mostly quiet; context syncs after you pause speaking (~3 s, or ~0.4 s when the app detects question-like phrasing—even if there is no **?** in the transcript). Use **Nudge interviewer** anytime you want a direct answer or feedback. See [LIVE_INTERVIEWER_BEHAVIOR.md](./LIVE_INTERVIEWER_BEHAVIOR.md).
 
 The server keeps your token **in memory** for that session only (lost on restart). When the token expires, sign in again.
 

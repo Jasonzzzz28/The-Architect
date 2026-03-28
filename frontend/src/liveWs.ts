@@ -4,14 +4,53 @@ export type LiveConnectionStatus = 'off' | 'connecting' | 'live' | 'error'
 export const LIVE_DEBOUNCE_MS = 3000
 
 /** When the candidate asks a question or asks for feedback, respond sooner. */
-export const LIVE_DEBOUNCE_URGENT_MS = 600
+export const LIVE_DEBOUNCE_URGENT_MS = 400
 
-const URGENT_RE =
-  /\?|\b(feedback|what do you think|what would you|anything i'?m missing|am i missing|does that make sense|any thoughts|thoughts\??|clarify|can you explain|should i go|do you want)\b/i
-
-/** True if transcript suggests T1/T2 (question or explicit ask for interviewer speech). */
+/**
+ * True if transcript suggests T1/T2 (question or ask for interviewer input).
+ * Speech-to-text often omits "?" — match common spoken question shapes and asks.
+ */
 export function liveTranscriptLooksUrgent(transcript: string): boolean {
-  return URGENT_RE.test(transcript.trim())
+  const t = transcript.trim()
+  if (!t) return false
+
+  if (/\?/.test(t)) return true
+
+  if (
+    /\b(feedback|what do you think|your thoughts|anything i'?m missing|am i missing|clarify|does that make sense|any thoughts|not sure|i wonder|i was wondering|quick question|want your (take|opinion)|hear your thoughts)\b/i.test(
+      t,
+    )
+  ) {
+    return true
+  }
+
+  // WH-word + auxiliary (e.g. "how does that work", "what would you want", "where does it go")
+  if (/\b(what|how|when|where|why|who|which)\s+(is|are|was|were|do|does|did|would|could|should|will|can)\s/i.test(t)) {
+    return true
+  }
+
+  if (/\bhow\s+(about|come|long|much|many|often|does|do|would|should|can|is)\b/i.test(t)) return true
+  // "explain how it works" / "how sharding works" (STT often no "?")
+  if (/\bhow\s+(\w+\s+){0,4}works?\b/i.test(t)) return true
+  if (/\bwhat\s+(about|if|else|happens?)\b/i.test(t)) return true
+
+  // Modal questions ("should I shard", "could we use", "can you explain")
+  if (/\b(should|could|would|can)\s+i\s/i.test(t)) return true
+  if (/\b(do|does)\s+you\s+(think|want|mean|recommend|expect|prefer|see|agree|suggest)\b/i.test(t)) return true
+  if (/\b(is|are)\s+(we|you|they|it)\s+(ok|okay|allowed|supposed|expected)\b/i.test(t)) return true
+  if (/\b(can|could|would)\s+you\s+(help|explain|clarify|confirm|tell|elaborate|walk|describe)\b/i.test(t)) {
+    return true
+  }
+
+  // "which database", "who owns", "any constraints"
+  if (/\bwhich\s+(one|approach|option|database|service|layer|tool|strategy)\b/i.test(t)) return true
+  if (/\bwho\s+(handles|owns|calls|uses)\b/i.test(t)) return true
+  if (/\b(any|some)\s+(constraints|requirements|preference|concern|downside|risk|limits?)\b/i.test(t)) {
+    return true
+  }
+  if (/\b(thoughts\s+on|make sense|sound right|reasonable approach)\b/i.test(t)) return true
+
+  return false
 }
 
 export function liveDebounceMsForTranscript(transcript: string): number {
@@ -59,6 +98,24 @@ export function buildLiveSessionStartTurn(): object {
   }
 }
 
+/** Diagram-only text turn while user audio is streamed via `realtime_input`. */
+export function buildLiveDiagramOnlyContext(diagramJson: string): object {
+  const cap = 12000
+  let body =
+    '(Canvas update only — your speech is streamed as live audio; use server voice activity to detect end of user turns. Do not treat this JSON alone as a new spoken turn. Stay silent unless T3 applies to the diagram.)\n\n'
+  if (diagramJson.trim()) {
+    body += `Excalidraw JSON (truncated):\n${diagramJson.slice(0, cap)}`
+  } else {
+    body += '(empty canvas snapshot)'
+  }
+  return {
+    client_content: {
+      turns: [{ role: 'user', parts: [{ text: body }] }],
+      turn_complete: true,
+    },
+  }
+}
+
 /** Background context for T3 only; model should usually stay silent. */
 export function buildLiveContextUpdate(transcript: string, diagramJson: string): object {
   const cap = 12000
@@ -97,6 +154,7 @@ export type ParsedLive =
   | { kind: 'setup_complete' }
   | { kind: 'text'; text: string }
   | { kind: 'audio'; base64Pcm: string; mimeType: string }
+  | { kind: 'input_transcription'; text: string; finished: boolean }
   | { kind: 'output_transcription'; text: string; finished: boolean }
   | { kind: 'turn_complete' }
   | { kind: 'interrupted' }
@@ -138,6 +196,17 @@ export function parseLiveServerMessages(raw: string): ParsedLive[] {
 
   if (sc.interrupted) {
     out.push({ kind: 'interrupted' })
+  }
+
+  const it = (sc.inputTranscription ?? sc.input_transcription) as
+    | { text?: string; finished?: boolean }
+    | undefined
+  if (it && typeof it.text === 'string') {
+    out.push({
+      kind: 'input_transcription',
+      text: it.text,
+      finished: Boolean(it.finished),
+    })
   }
 
   const ot = (sc.outputTranscription ?? sc.output_transcription) as

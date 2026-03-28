@@ -3,10 +3,10 @@ import type { LiveConnectionStatus } from '../liveWs'
 type Props = {
   sessionReady: boolean
   listening: boolean
-  supported: boolean
+  speechSupported: boolean
+  micSupported: boolean
   voiceError: string | null
   transcript: string
-  onTranscriptChange: (value: string) => void
   onToggleListen: () => void
   autoFeedback: boolean
   onToggleAuto: () => void
@@ -20,10 +20,10 @@ type Props = {
 export function VoiceControls({
   sessionReady,
   listening,
-  supported,
+  speechSupported,
+  micSupported,
   voiceError,
   transcript,
-  onTranscriptChange,
   onToggleListen,
   autoFeedback,
   onToggleAuto,
@@ -37,10 +37,12 @@ export function VoiceControls({
     autoFeedback && liveStatus === 'connecting'
       ? 'Connecting to Gemini Live…'
       : autoFeedback && liveStatus === 'live'
-        ? 'Live interviewer stays quiet unless you ask something, request feedback, or use Nudge. Context syncs after you pause (~3s; faster if you type a question).'
+        ? 'Your microphone is streamed to Gemini Live; end-of-speech is detected on the server so the interviewer decides when to reply. Diagram-only updates sync about every 4s after edits. Use Nudge for an immediate reply.'
         : autoFeedback && liveStatus === 'error'
           ? 'Live connection issue — check the feedback panel or reconnect.'
           : null
+
+  const startVoiceDisabled = !sessionReady || autoFeedback || !speechSupported
 
   return (
     <div className="voice-controls">
@@ -49,7 +51,12 @@ export function VoiceControls({
           type="button"
           className={`btn ${listening ? 'danger' : 'secondary'}`}
           onClick={onToggleListen}
-          disabled={!sessionReady || !supported}
+          disabled={startVoiceDisabled}
+          title={
+            autoFeedback
+              ? 'With Auto (Live) on, speech goes to Gemini via the microphone stream.'
+              : undefined
+          }
         >
           {listening ? 'Stop listening' : 'Start voice'}
         </button>
@@ -57,8 +64,12 @@ export function VoiceControls({
           type="button"
           className={`btn ${autoFeedback ? 'primary' : 'secondary'}`}
           onClick={onToggleAuto}
-          disabled={!sessionReady}
-          title="Vertex Gemini Live: streaming native audio + captions (WebSocket)"
+          disabled={!sessionReady || (autoFeedback && !micSupported)}
+          title={
+            !micSupported
+              ? 'Live voice input needs microphone access (getUserMedia).'
+              : 'Vertex Gemini Live: mic → server activity detection → native audio replies'
+          }
         >
           Auto (Live) {autoFeedback ? 'on' : 'off'}
         </button>
@@ -82,28 +93,40 @@ export function VoiceControls({
       </div>
       {liveHint ? <p className="muted small">{liveHint}</p> : null}
       {voiceError ? <p className="form-error small voice-error">{voiceError}</p> : null}
-      {!supported ? (
+      {!speechSupported && !autoFeedback ? (
         <p className="muted small">
-          Web Speech API not available in this browser. You can still type in the transcript area or
-          use Chrome / Edge.
+          Web Speech API is not available. Use Chrome or Edge for <strong>Start voice</strong>, or turn on{' '}
+          <strong>Auto (Live)</strong> if this browser supports the microphone API.
+        </p>
+      ) : null}
+      {autoFeedback && !micSupported ? (
+        <p className="muted small">
+          This browser does not expose <code>getUserMedia</code>; Live voice input will not work here.
         </p>
       ) : null}
       <label className="transcript-label" htmlFor="transcript">
-        Live transcript
+        Live transcript{' '}
+        <span className="transcript-label-hint">
+          {autoFeedback ? '(from Gemini input transcription, read-only)' : '(voice only, read-only)'}
+        </span>
       </label>
       <textarea
         id="transcript"
         className="transcript-area"
         rows={5}
         value={transcript}
-        readOnly={listening}
-        onChange={(e) => {
-          if (!listening) onTranscriptChange(e.target.value)
-        }}
+        readOnly
+        aria-readonly="true"
         placeholder={
-          supported
-            ? 'Speak your design, or type here if speech is unavailable.'
-            : 'Type your system design explanation here.'
+          autoFeedback && liveReady
+            ? 'Speak toward the mic — Gemini transcribes your words here when the API sends captions.'
+            : speechSupported
+              ? listening
+                ? 'Listening…'
+                : 'Press Start voice — your words appear here automatically.'
+              : micSupported
+                ? 'Turn on Auto (Live) to speak into Gemini, or use a browser with Web Speech for Start voice.'
+                : 'Voice capture unavailable in this browser.'
         }
       />
     </div>

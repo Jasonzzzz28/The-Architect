@@ -6,11 +6,11 @@ import '@excalidraw/excalidraw/index.css'
 import './App.css'
 import { ApiError, getFeedback, sendDiagram, streamVoice, verifyGcp } from './api'
 import { LiveAudioOut } from './liveAudioPlayer'
+import { isGetUserMediaSupported, LiveMicStreamer } from './liveMicPcm'
 import {
-  buildLiveContextUpdate,
+  buildLiveDiagramOnlyContext,
   buildLiveNudgeTurn,
   buildLiveSessionStartTurn,
-  liveDebounceMsForTranscript,
   liveWebSocketUrl,
   parseLiveServerMessages,
   wsPayloadToUtf8,
@@ -56,6 +56,8 @@ export default function App() {
   const liveOpeningSentRef = useRef(false)
   /** False until first `turn_complete` — avoids sending context during T0 audio (interrupts native-audio stream). */
   const liveAmbientAllowedRef = useRef(false)
+  /** True while the model is generating/speaking this turn; new `client_content` would interrupt and restart audio. */
+  const liveModelBusyRef = useRef(false)
   const diagramForLiveRef = useRef<string>('')
   const recRef = useRef<SpeechRecognition | null>(null)
   /** Text confirmed as final by the speech engine; interim hypotheses are not stored here. */
@@ -63,6 +65,8 @@ export default function App() {
   const transcriptRef = useRef(transcript)
 
   const speechSupported = Boolean(getSpeechRecognitionConstructor())
+  const micSupported = isGetUserMediaSupported()
+  const liveMicRef = useRef<LiveMicStreamer | null>(null)
 
   useEffect(() => {
     sessionIdRef.current = sessionId
@@ -147,6 +151,7 @@ export default function App() {
   }, [sessionId, transcript, invalidateSession])
 
   const toggleListening = useCallback(() => {
+    if (autoFeedback) return
     setVoiceError(null)
 
     if (listening) {
@@ -232,7 +237,7 @@ export default function App() {
       recRef.current = null
       setVoiceError(e instanceof Error ? e.message : 'Could not start speech recognition.')
     }
-  }, [listening])
+  }, [listening, autoFeedback])
 
   useEffect(() => {
     return () => {
@@ -246,7 +251,7 @@ export default function App() {
   }, [])
 
   useEffect(() => {
-    if (!sessionId || !transcript) return
+    if (!sessionId || !transcript || autoFeedback) return
     const t = setInterval(() => {
       void streamVoice(sessionId, transcript).catch((e) => {
         if (e instanceof ApiError && e.status === 404) {
@@ -257,7 +262,7 @@ export default function App() {
       })
     }, 2500)
     return () => clearInterval(t)
-  }, [sessionId, transcript, invalidateSession])
+  }, [sessionId, transcript, invalidateSession, autoFeedback])
 
   useEffect(() => {
     if (!autoFeedback || !sessionId) {
@@ -277,8 +282,10 @@ export default function App() {
     setLiveReady(false)
     setLiveError(null)
     setLiveStreamText('')
+    setTranscript('')
     liveOpeningSentRef.current = false
     liveAmbientAllowedRef.current = false
+    liveModelBusyRef.current = false
 
     const url = liveWebSocketUrl(sessionId)
     const ws = new WebSocket(url)
@@ -301,19 +308,36 @@ export default function App() {
               setLiveStatus('live')
               break
             case 'audio':
+              liveModelBusyRef.current = true
               if (!liveAudioRef.current) liveAudioRef.current = new LiveAudioOut()
               liveAudioRef.current.enqueueBase64Pcm16Le(parsed.base64Pcm, parsed.mimeType)
               break
+            case 'input_transcription': {
+              const piece = parsed.text
+              if (!piece) break
+              setTranscript((prev) => {
+                if (parsed.finished) {
+                  return prev ? `${prev} ${piece}`.trim() : piece
+                }
+                return prev ? `${prev}${piece}` : piece
+              })
+              break
+            }
             case 'output_transcription':
+              liveModelBusyRef.current = true
               setLiveStreamText((prev) => prev + parsed.text)
               break
             case 'interrupted':
+              liveModelBusyRef.current = false
               liveAudioRef.current?.interrupt()
+              setLiveAmbientGate((g) => g + 1)
               break
             case 'text':
+              liveModelBusyRef.current = true
               setLiveStreamText((prev) => prev + parsed.text)
               break
             case 'turn_complete':
+              liveModelBusyRef.current = false
               liveAmbientAllowedRef.current = true
               setLiveAmbientGate((g) => g + 1)
               setLiveStreamText((prev) => (/\n\n$/.test(prev) ? prev : `${prev}\n\n`))
@@ -349,12 +373,59 @@ export default function App() {
 
     return () => {
       cancelled = true
+      liveMicRef.current?.stop()
+      liveMicRef.current = null
       if (liveWsRef.current === ws) liveWsRef.current = null
       ws.close()
       liveAudioRef.current?.close()
       liveAudioRef.current = null
     }
   }, [autoFeedback, sessionId])
+
+  useEffect(() => {
+    if (!autoFeedback || !liveReady) {
+      liveMicRef.current?.stop()
+      liveMicRef.current = null
+      return
+    }
+    if (!micSupported) {
+      setVoiceError('Microphone access is required for Live voice input (getUserMedia).')
+      return
+    }
+
+    let cancelled = false
+    let attempts = 0
+    const streamer = new LiveMicStreamer(() => liveWsRef.current)
+
+    const tryStart = () => {
+      if (cancelled) return
+      const w = liveWsRef.current
+      if (!w || w.readyState !== WebSocket.OPEN) {
+        if (attempts++ < 50) window.setTimeout(tryStart, 100)
+        return
+      }
+      void streamer.start().then(() => {
+        if (cancelled) {
+          streamer.stop()
+          return
+        }
+        liveMicRef.current = streamer
+        setVoiceError(null)
+      }).catch((e) => {
+        if (!cancelled) {
+          setVoiceError(e instanceof Error ? e.message : 'Could not open microphone.')
+        }
+      })
+    }
+
+    window.setTimeout(tryStart, 0)
+
+    return () => {
+      cancelled = true
+      streamer.stop()
+      if (liveMicRef.current === streamer) liveMicRef.current = null
+    }
+  }, [autoFeedback, liveReady, micSupported])
 
   useEffect(() => {
     if (!autoFeedback || !liveReady || !sessionId) return
@@ -384,20 +455,21 @@ export default function App() {
   useEffect(() => {
     if (!autoFeedback || !liveReady || !sessionId) return
     if (!liveAmbientAllowedRef.current) return
+    if (liveModelBusyRef.current) return
     const ws = liveWsRef.current
     if (!ws || ws.readyState !== WebSocket.OPEN) return
-    const tTrim = transcript.trim()
     const dj = diagramForLiveRef.current.trim()
-    if (!tTrim && !dj) return
+    if (!dj) return
 
-    const ms = liveDebounceMsForTranscript(transcript)
+    const ms = 4000
     const id = window.setTimeout(() => {
       if (liveWsRef.current !== ws || ws.readyState !== WebSocket.OPEN) return
       if (!liveAmbientAllowedRef.current) return
-      ws.send(JSON.stringify(buildLiveContextUpdate(transcript, diagramForLiveRef.current)))
+      if (liveModelBusyRef.current) return
+      ws.send(JSON.stringify(buildLiveDiagramOnlyContext(diagramForLiveRef.current)))
     }, ms)
     return () => clearTimeout(id)
-  }, [transcript, diagramEpoch, autoFeedback, liveReady, sessionId, liveAmbientGate])
+  }, [diagramEpoch, autoFeedback, liveReady, sessionId, liveAmbientGate])
 
   return (
     <div className="app-shell">
@@ -445,10 +517,10 @@ export default function App() {
           <VoiceControls
             sessionReady={Boolean(sessionId)}
             listening={listening}
-            supported={speechSupported}
+            speechSupported={speechSupported}
+            micSupported={micSupported}
             voiceError={voiceError}
             transcript={transcript}
-            onTranscriptChange={setTranscript}
             onToggleListen={toggleListening}
             autoFeedback={autoFeedback}
             onToggleAuto={() => setAutoFeedback((v) => !v)}
