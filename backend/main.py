@@ -15,6 +15,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from ai_module import generate_feedback
+from design_problems import (
+    context_for_custom,
+    context_for_preset,
+    default_problem_context,
+    display_for,
+    list_presets_public,
+)
 from live_bridge import run_live_bridge
 
 logger = logging.getLogger(__name__)
@@ -91,6 +98,34 @@ class FeedbackResponse(BaseModel):
     mentioned_topics: list[str] = []
 
 
+class SetDesignProblemBody(BaseModel):
+    session_id: str = Field(description="Session from /verify-gcp")
+    preset_id: str | None = Field(
+        default=None,
+        description="One of: url_shortener, youtube, twitter_feed, rate_limiter, ticket_booking",
+    )
+    custom_problem: str | None = Field(
+        default=None,
+        description="If non-empty, overrides preset_id with a custom problem statement",
+    )
+
+
+class SetDesignProblemResponse(BaseModel):
+    problem_id: str
+    title: str
+    summary: str
+
+
+class DesignPreset(BaseModel):
+    id: str
+    title: str
+    summary: str
+
+
+class DesignProblemsResponse(BaseModel):
+    presets: list[DesignPreset]
+
+
 def _pick_project_id(crm_json: dict[str, Any], requested: str | None) -> str:
     projects = crm_json.get("projects") or []
     ids: list[str] = []
@@ -147,11 +182,15 @@ async def verify_gcp(body: VerifyBody) -> VerifyResponse:
         raise
 
     sid = str(uuid.uuid4())
+    def_pid, def_ctx = default_problem_context()
     sessions[sid] = {
         "transcript": "",
         "diagram": None,
         "access_token": token,
         "project_id": project_id,
+        "problem_id": def_pid,
+        "problem_context": def_ctx,
+        "custom_problem": None,
     }
     return VerifyResponse(
         valid=True,
@@ -159,6 +198,47 @@ async def verify_gcp(body: VerifyBody) -> VerifyResponse:
         project_id=project_id,
         message="GCP token verified; Vertex AI will use this token for feedback.",
     )
+
+
+@app.get("/design-problems", response_model=DesignProblemsResponse)
+async def design_problems() -> DesignProblemsResponse:
+    rows = list_presets_public()
+    return DesignProblemsResponse(
+        presets=[DesignPreset(id=r["id"], title=r["title"], summary=r["summary"]) for r in rows],
+    )
+
+
+@app.post("/session/design-problem", response_model=SetDesignProblemResponse)
+async def set_design_problem(body: SetDesignProblemBody) -> SetDesignProblemResponse:
+    if body.session_id not in sessions:
+        raise HTTPException(status_code=404, detail="Invalid session")
+    s = sessions[body.session_id]
+    custom = (body.custom_problem or "").strip()
+    if custom:
+        try:
+            ctx = context_for_custom(custom)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        s["problem_id"] = "custom"
+        s["custom_problem"] = custom
+        s["problem_context"] = ctx
+        title, summary = display_for("custom", custom)
+    else:
+        pid = (body.preset_id or "").strip()
+        if not pid:
+            raise HTTPException(
+                status_code=400,
+                detail="Provide preset_id or a non-empty custom_problem",
+            )
+        try:
+            ctx = context_for_preset(pid)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        s["problem_id"] = pid
+        s["custom_problem"] = None
+        s["problem_context"] = ctx
+        title, summary = display_for(pid, None)
+    return SetDesignProblemResponse(problem_id=s["problem_id"], title=title, summary=summary)
 
 
 @app.post("/stream-voice")
@@ -200,12 +280,17 @@ async def get_feedback(body: GetFeedbackBody) -> FeedbackResponse:
             status_code=503,
             detail="Session has no stored credentials. Sign in again with your GCP access token.",
         )
+    problem_ctx = s.get("problem_context")
+    if not isinstance(problem_ctx, str) or not problem_ctx.strip():
+        _, problem_ctx = default_problem_context()
+
     try:
         result = await generate_feedback(
             transcript,
             diagram if isinstance(diagram, dict) else None,
             access_token=str(access_token),
             project_id=str(project_id),
+            problem_context=str(problem_ctx),
         )
     except ValueError as e:
         raise HTTPException(status_code=503, detail=str(e)) from e
@@ -250,7 +335,16 @@ async def websocket_live(websocket: WebSocket, session_id: str) -> None:
         tag,
         project_id,
     )
-    await run_live_bridge(websocket, str(token), str(project_id), client_tag=tag)
+    problem_ctx = s.get("problem_context")
+    if not isinstance(problem_ctx, str) or not problem_ctx.strip():
+        _, problem_ctx = default_problem_context()
+    await run_live_bridge(
+        websocket,
+        str(token),
+        str(project_id),
+        problem_context=str(problem_ctx),
+        client_tag=tag,
+    )
     logger.info("ws/live bridge returned session=%s…", tag)
 
 

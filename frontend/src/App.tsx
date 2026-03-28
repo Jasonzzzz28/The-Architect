@@ -4,7 +4,16 @@ import type { ExcalidrawImperativeAPI } from '@excalidraw/excalidraw/types'
 import type { OrderedExcalidrawElement } from '@excalidraw/excalidraw/element/types'
 import '@excalidraw/excalidraw/index.css'
 import './App.css'
-import { ApiError, getFeedback, sendDiagram, streamVoice, verifyGcp } from './api'
+import {
+  ApiError,
+  getDesignProblems,
+  getFeedback,
+  sendDiagram,
+  setDesignProblem,
+  streamVoice,
+  verifyGcp,
+  type DesignPresetRow,
+} from './api'
 import { LiveAudioOut } from './liveAudioPlayer'
 import { isGetUserMediaSupported, LiveMicStreamer } from './liveMicPcm'
 import {
@@ -20,6 +29,39 @@ import { FeedbackPanel } from './components/FeedbackPanel'
 import { GcpTokenModal } from './components/GcpTokenModal'
 import { VoiceControls } from './components/VoiceControls'
 import { getSpeechRecognitionConstructor, speak } from './speech'
+
+const FALLBACK_PRESETS: DesignPresetRow[] = [
+  {
+    id: 'url_shortener',
+    title: 'URL shortener',
+    summary:
+      'Create short links, fast redirects, and sensible scale (millions of links, high read traffic).',
+  },
+  {
+    id: 'youtube',
+    title: 'Design YouTube',
+    summary:
+      'Video upload, encoding/transcoding, storage, CDN delivery, recommendations at scale, and metadata/search.',
+  },
+  {
+    id: 'twitter_feed',
+    title: 'Design Twitter News Feed',
+    summary:
+      'Fan-out on write vs read, timeline generation, ranking, and real-time feel at large scale.',
+  },
+  {
+    id: 'rate_limiter',
+    title: 'Rate Limiter',
+    summary:
+      'Distributed rate limiting (token bucket / sliding window), accuracy vs memory, and API gateway use.',
+  },
+  {
+    id: 'ticket_booking',
+    title: 'Ticket Booking System',
+    summary:
+      'Seat inventory, concurrency, payments, and avoiding double-booking under load.',
+  },
+]
 
 function serializeElements(elements: readonly OrderedExcalidrawElement[]) {
   try {
@@ -48,6 +90,17 @@ export default function App() {
   const [diagramEpoch, setDiagramEpoch] = useState(0)
   /** Bumps when Live may send debounced context (after first model `turn_complete` or fallback timeout). */
   const [liveAmbientGate, setLiveAmbientGate] = useState(0)
+  const [presets, setPresets] = useState<DesignPresetRow[]>(FALLBACK_PRESETS)
+  /** Preset id from server, or 'custom' for user-written problem */
+  const [problemId, setProblemId] = useState<string>('url_shortener')
+  const [customProblem, setCustomProblem] = useState('')
+  const [problemTitle, setProblemTitle] = useState('URL shortener')
+  const [problemSummary, setProblemSummary] = useState(FALLBACK_PRESETS[0].summary)
+  const [problemVersion, setProblemVersion] = useState(0)
+  const [problemSyncBusy, setProblemSyncBusy] = useState(false)
+  const [problemSyncError, setProblemSyncError] = useState<string | null>(null)
+  /** Latest problem wording for Live T0 (ref avoids reconnecting WS on every local title/summary tweak). */
+  const liveProblemBriefRef = useRef({ title: 'URL shortener', summary: FALLBACK_PRESETS[0].summary })
   const excalidrawRef = useRef<ExcalidrawImperativeAPI | null>(null)
   const diagramDebounce = useRef<ReturnType<typeof setTimeout> | null>(null)
   const sessionIdRef = useRef<string | null>(null)
@@ -75,6 +128,62 @@ export default function App() {
   useEffect(() => {
     transcriptRef.current = transcript
   }, [transcript])
+
+  useEffect(() => {
+    void getDesignProblems()
+      .then((r) => {
+        if (r.presets?.length) setPresets(r.presets)
+      })
+      .catch(() => {
+        /* keep FALLBACK_PRESETS */
+      })
+  }, [])
+
+  useEffect(() => {
+    if (problemId === 'custom') {
+      const raw = customProblem.trim()
+      const line = raw.split('\n')[0] || 'Describe your design question below, then apply.'
+      setProblemTitle('Custom design problem')
+      setProblemSummary(line.length > 220 ? `${line.slice(0, 217)}…` : line)
+      return
+    }
+    const p = presets.find((x) => x.id === problemId)
+    if (p) {
+      setProblemTitle(p.title)
+      setProblemSummary(p.summary)
+    }
+  }, [problemId, customProblem, presets])
+
+  useEffect(() => {
+    liveProblemBriefRef.current = { title: problemTitle, summary: problemSummary }
+  }, [problemTitle, problemSummary])
+
+  const syncDesignProblem = useCallback(async (sid: string, pid: string, custom: string) => {
+    let body: { preset_id?: string; custom_problem?: string }
+    if (pid === 'custom' && custom.trim()) {
+      body = { custom_problem: custom.trim() }
+    } else if (pid === 'custom') {
+      body = { preset_id: 'url_shortener' }
+      setProblemId('url_shortener')
+    } else {
+      body = { preset_id: pid }
+    }
+    setProblemSyncBusy(true)
+    setProblemSyncError(null)
+    try {
+      const r = await setDesignProblem(sid, body)
+      setProblemTitle(r.title)
+      setProblemSummary(r.summary)
+      liveProblemBriefRef.current = { title: r.title, summary: r.summary }
+      setProblemVersion((v) => v + 1)
+    } catch (e) {
+      setProblemSyncError(
+        e instanceof ApiError ? e.message : 'Could not update design problem on the server.',
+      )
+    } finally {
+      setProblemSyncBusy(false)
+    }
+  }, [])
 
   const invalidateSession = useCallback((hint?: string) => {
     if (diagramDebounce.current) {
@@ -302,7 +411,7 @@ export default function App() {
               if (!liveAudioRef.current) liveAudioRef.current = new LiveAudioOut()
               if (!liveOpeningSentRef.current && ws.readyState === WebSocket.OPEN) {
                 liveOpeningSentRef.current = true
-                ws.send(JSON.stringify(buildLiveSessionStartTurn()))
+                ws.send(JSON.stringify(buildLiveSessionStartTurn(liveProblemBriefRef.current)))
               }
               setLiveReady(true)
               setLiveStatus('live')
@@ -380,7 +489,7 @@ export default function App() {
       liveAudioRef.current?.close()
       liveAudioRef.current = null
     }
-  }, [autoFeedback, sessionId])
+  }, [autoFeedback, sessionId, problemVersion])
 
   useEffect(() => {
     if (!autoFeedback || !liveReady) {
@@ -480,6 +589,12 @@ export default function App() {
           setSessionId(res.session_id)
           setGcpProjectId(res.project_id)
           setShowGcp(false)
+          const pid =
+            problemId === 'custom' && !customProblem.trim() ? 'url_shortener' : problemId
+          if (problemId === 'custom' && !customProblem.trim()) {
+            setProblemId('url_shortener')
+          }
+          void syncDesignProblem(res.session_id, pid, customProblem)
         }}
       />
 
@@ -505,11 +620,63 @@ export default function App() {
       </header>
 
       <section className="problem-banner" aria-labelledby="problem-title">
-        <h2 id="problem-title">Today&apos;s problem: URL shortener</h2>
-        <p>
-          Design a service like bit.ly: create short links, fast redirects, and sensible scale.
-          Explain trade-offs aloud and sketch your architecture in the canvas.
-        </p>
+        <div className="problem-banner-top">
+          <h2 id="problem-title">{problemTitle}</h2>
+          <div className="problem-picker" role="group" aria-label="Design problem">
+            {presets.map((p) => (
+              <button
+                key={p.id}
+                type="button"
+                className={`problem-chip${problemId === p.id ? ' active' : ''}`}
+                disabled={problemSyncBusy}
+                onClick={() => {
+                  setProblemId(p.id)
+                  if (sessionId) void syncDesignProblem(sessionId, p.id, customProblem)
+                }}
+              >
+                {p.title}
+              </button>
+            ))}
+            <button
+              type="button"
+              className={`problem-chip${problemId === 'custom' ? ' active' : ''}`}
+              disabled={problemSyncBusy}
+              onClick={() => setProblemId('custom')}
+            >
+              Custom
+            </button>
+          </div>
+        </div>
+        {problemId === 'custom' ? (
+          <div className="problem-custom">
+            <label htmlFor="custom-problem" className="field-label">
+              Your problem
+            </label>
+            <textarea
+              id="custom-problem"
+              className="problem-custom-input"
+              rows={3}
+              placeholder="e.g. Design a distributed cache, a real-time collaboration editor, a URL shortener…"
+              value={customProblem}
+              onChange={(e) => setCustomProblem(e.target.value)}
+              disabled={problemSyncBusy}
+            />
+            {sessionId ? (
+              <button
+                type="button"
+                className="btn secondary problem-apply"
+                disabled={problemSyncBusy}
+                onClick={() => void syncDesignProblem(sessionId, 'custom', customProblem)}
+              >
+                {problemSyncBusy ? 'Saving…' : 'Apply custom problem'}
+              </button>
+            ) : (
+              <p className="problem-custom-hint">Sign in to use a custom problem with AI feedback and Live mode.</p>
+            )}
+          </div>
+        ) : null}
+        <p className="problem-summary">{problemSummary}</p>
+        {problemSyncError ? <p className="form-error problem-sync-err">{problemSyncError}</p> : null}
       </section>
 
       <main className="app-main">

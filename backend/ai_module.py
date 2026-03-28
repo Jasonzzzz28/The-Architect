@@ -8,20 +8,13 @@ import re
 from typing import Any
 
 
-PROBLEM_CONTEXT = """You are a senior staff engineer conducting a system design interview.
-Problem: Design a URL shortener (e.g., bit.ly style) that supports:
-- Creating short URLs from long URLs
-- Redirects with low latency
-- Reasonable scale (millions of links, high read traffic)
-Encourage trade-offs: hashing vs DB IDs, cache, DB choice, rate limits, analytics."""
-
-
 async def generate_feedback(
     transcript: str,
     diagram: dict[str, Any] | None,
     *,
     access_token: str,
     project_id: str,
+    problem_context: str,
 ) -> dict[str, Any]:
     token = access_token.strip()
     if not token:
@@ -29,7 +22,9 @@ async def generate_feedback(
     pid = project_id.strip()
     if not pid:
         raise ValueError("GCP project ID is missing.")
-    return await _vertex_gemini_feedback(transcript, diagram, token, pid)
+    return await _vertex_gemini_feedback(
+        transcript, diagram, token, pid, problem_context.strip()
+    )
 
 
 async def _vertex_gemini_feedback(
@@ -37,6 +32,7 @@ async def _vertex_gemini_feedback(
     diagram: dict[str, Any] | None,
     access_token: str,
     project_id: str,
+    problem_context: str,
 ) -> dict[str, Any]:
     import httpx
 
@@ -44,7 +40,8 @@ async def _vertex_gemini_feedback(
     model = (os.environ.get("VERTEX_GEMINI_MODEL") or "gemini-2.5-flash").strip() or "gemini-2.5-flash" 
 
     diagram_str = json.dumps(diagram or {}, default=str)[:12000]
-    user_prompt = f"""{PROBLEM_CONTEXT}
+    pc = problem_context or "You are a senior staff engineer conducting a system design interview."
+    user_prompt = f"""{pc}
 
 Candidate spoken explanation (may be partial):
 {transcript or "(none yet)"}

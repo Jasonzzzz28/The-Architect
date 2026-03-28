@@ -106,6 +106,12 @@ Pass `CORS_ORIGINS` if the UI is on another host.
 
 **Backend:** `uvicorn main:app --reload` (from `backend/` with venv active)
 
+## Team
+
+| Name | Role |
+|------|------|
+| [Jason Zhang](https://github.com/Jasonzzzz28) | Creator |
+
 ## License
 
-Add a license file if you plan to distribute the project.
+[MIT](./LICENSE) © 2026 Jason Zhang

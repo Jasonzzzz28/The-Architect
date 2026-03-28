@@ -96,3 +96,28 @@ export function getFeedback(
     }),
   })
 }
+
+export type DesignPresetRow = { id: string; title: string; summary: string }
+
+export type SetDesignProblemResponse = {
+  problem_id: string
+  title: string
+  summary: string
+}
+
+export function getDesignProblems() {
+  return json<{ presets: DesignPresetRow[] }>('/design-problems')
+}
+
+export function setDesignProblem(
+  sessionId: string,
+  body: { preset_id?: string; custom_problem?: string },
+) {
+  return json<SetDesignProblemResponse>('/session/design-problem', {
+    method: 'POST',
+    body: JSON.stringify({
+      session_id: sessionId,
+      ...body,
+    }),
+  })
+}

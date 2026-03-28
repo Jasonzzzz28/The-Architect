@@ -16,8 +16,6 @@ import certifi
 import websockets
 from fastapi import WebSocket, WebSocketDisconnect
 
-from ai_module import PROBLEM_CONTEXT
-
 logger = logging.getLogger(__name__)
 
 LIVE_INSTRUCTION_SUFFIX = """
@@ -44,8 +42,11 @@ Never read back long transcripts. Do not react to every diagram JSON update. Do 
 """
 
 
-def _live_system_prompt() -> str:
-    return PROBLEM_CONTEXT.strip() + LIVE_INSTRUCTION_SUFFIX
+def live_system_prompt(problem_context: str) -> str:
+    base = (problem_context or "").strip() or (
+        "You are a senior staff engineer conducting a system design interview."
+    )
+    return base + LIVE_INSTRUCTION_SUFFIX
 
 
 def _vertex_live_url(location: str) -> str:
@@ -60,6 +61,8 @@ def build_setup_message(
     location: str,
     model: str,
     voice_name: str,
+    *,
+    problem_context: str,
 ) -> dict[str, Any]:
     model_uri = f"projects/{project_id}/locations/{location}/publishers/google/models/{model}"
     return {
@@ -77,7 +80,7 @@ def build_setup_message(
                 },
             },
             "system_instruction": {
-                "parts": [{"text": _live_system_prompt()}],
+                "parts": [{"text": live_system_prompt(problem_context)}],
             },
             "proactivity": {"proactiveAudio": False},
             "input_audio_transcription": {},
@@ -153,6 +156,7 @@ async def run_live_bridge(
     access_token: str,
     project_id: str,
     *,
+    problem_context: str,
     client_tag: str = "—",
 ) -> None:
     location = (os.environ.get("VERTEX_AI_LOCATION") or "us-central1").strip() or "us-central1"
@@ -183,7 +187,9 @@ async def run_live_bridge(
             max_size=None,
         ) as upstream:
             logger.info("[%s] live_bridge: upstream WebSocket open", client_tag)
-            setup = build_setup_message(project_id, location, model, voice)
+            setup = build_setup_message(
+                project_id, location, model, voice, problem_context=problem_context
+            )
             setup_raw = json.dumps(setup)
             await upstream.send(setup_raw)
             logger.info(

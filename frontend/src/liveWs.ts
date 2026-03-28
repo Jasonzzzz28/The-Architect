@@ -80,7 +80,8 @@ export function liveWebSocketUrl(sessionId: string): string {
 }
 
 /** T0 — one opening turn; sent once after `setupComplete`. */
-export function buildLiveSessionStartTurn(): object {
+export function buildLiveSessionStartTurn(problem: { title: string; summary: string }): object {
+  const brief = `${problem.title}: ${problem.summary}`.trim()
   return {
     client_content: {
       turns: [
@@ -88,7 +89,7 @@ export function buildLiveSessionStartTurn(): object {
           role: 'user',
           parts: [
             {
-              text: '(Session start — T0.) You are connected with the candidate. Give exactly ONE brief spoken opening: restate the URL-shortener design problem in one or two sentences, tell them to walk you through their approach and to ask you for requirements or constraints, then STOP and wait. Do not ask them to repeat everything they said.',
+              text: `(Session start — T0.) You are connected with the candidate. Give exactly ONE brief spoken opening: restate the following design problem in one or two sentences, tell them to walk you through their approach and to ask you for requirements or constraints, then STOP and wait. Do not ask them to repeat everything they said.\n\nProblem: ${brief}`,
             },
           ],
         },
